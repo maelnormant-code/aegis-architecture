@@ -1,0 +1,5 @@
+{
+  "llama_cpp_version": "b3000",
+  "source_tarball_sha256": "<fill in after verifying>",
+  "compiled_binary_sha256": "<fill in after first build>"
+}

@@ -1,0 +1,26 @@
+[Unit]
+Description=Aegis Tunnel Proxy Service
+Documentation=https://github.com/maelnormant-code/aegis-tunnel-app
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/libexec/qubes-aegis/aegis-tunnel-proxy.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Basic hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET
+
+[Install]
+WantedBy=multi-user.target

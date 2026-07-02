@@ -1,0 +1,91 @@
+#!/bin/bash
+# aegis-dev-toggle-llm — Dev tool to switch sys-ai backend between local llama-server and cloud Gemini.
+
+set -euo pipefail
+
+VAR_DIR="/var/lib/aegis"
+KEY_FILE="$VAR_DIR/gemini.key"
+MODEL_FILE="$VAR_DIR/gemini.model"
+
+if [ "$EUID" -ne 0 ]; then
+    echo "Error: Please run as root (sudo)." >&2
+    exit 1
+fi
+
+usage() {
+    echo "Usage: aegis-dev-toggle-llm [gemini <api_key> [model_name] | local | status]"
+    echo "  gemini: Switch inference backend to Google Gemini"
+    echo "  local:  Switch back to local llama-server"
+    echo "  status: Show current LLM backend status"
+    exit 1
+}
+
+if [ $# -lt 1 ]; then
+    usage
+fi
+
+COMMAND="$1"
+
+case "$COMMAND" in
+    gemini)
+        if [ $# -lt 2 ]; then
+            echo "Error: Gemini API key required." >&2
+            usage
+        fi
+        API_KEY="$2"
+        MODEL_NAME="${3:-gemini-1.5-flash}"
+
+        echo "Switching backend to Google Gemini ($MODEL_NAME)..."
+        
+        mkdir -p "$VAR_DIR"
+        chmod 700 "$VAR_DIR"
+        chown aegis-ai:aegis-ai "$VAR_DIR" || true
+
+        echo "$API_KEY" > "$KEY_FILE"
+        chmod 600 "$KEY_FILE"
+        chown aegis-ai:aegis-ai "$KEY_FILE" || true
+
+        echo "$MODEL_NAME" > "$MODEL_FILE"
+        chmod 600 "$MODEL_FILE"
+        chown aegis-ai:aegis-ai "$MODEL_FILE" || true
+
+        echo "Enabling and starting aegis-gemini.service..."
+        systemctl disable aegis-llama.service --now || true
+        systemctl enable aegis-gemini.service --now
+
+        echo "Backend successfully switched to Gemini!"
+        ;;
+
+    local)
+        echo "Switching backend to local LLaMA..."
+        systemctl disable aegis-gemini.service --now || true
+        systemctl enable aegis-llama.service --now
+        echo "Backend successfully switched to local LLaMA!"
+        ;;
+
+    status)
+        echo "=== Aegis Inference Backend Status ==="
+        if systemctl is-active --quiet aegis-gemini.service; then
+            echo "Active Backend: Google Gemini"
+            if [ -f "$MODEL_FILE" ]; then
+                echo "Model:          $(cat "$MODEL_FILE")"
+            else
+                echo "Model:          gemini-1.5-flash (default)"
+            fi
+            if [ -f "$KEY_FILE" ]; then
+                echo "API Key:        Configured"
+            else
+                echo "API Key:        Not specified (using built-in default)"
+            fi
+        elif systemctl is-active --quiet aegis-llama.service; then
+            echo "Active Backend: Local llama-server"
+            echo "Service:        aegis-llama.service"
+        else
+            echo "Active Backend: None (both services stopped)"
+        fi
+        ;;
+
+    *)
+        usage
+        ;;
+esac

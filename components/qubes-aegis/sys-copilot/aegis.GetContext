@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+"""
+aegis.GetContext — qrexec RPC handler running inside sys-copilot.
+
+SECURITY CONTRACT:
+  - This script is invoked by the qrexec daemon in sys-copilot.
+  - QREXEC_REMOTE_DOMAIN env var identifies the calling VM (set by Qubes).
+  - Input arrives on stdin from an untrusted guest AppVM.
+  - Output goes to stdout back to the calling VM.
+
+AUDIT FIXES (2026-06-29):
+  - CRITICAL-SEC-1a: Added MAX_INPUT_BYTES cap to prevent DoS via huge queries.
+  - CRITICAL-SEC-1b: Added character-level whitelist sanitization on query string.
+  - CRITICAL-SEC-1c: Added LIMIT clause to SQL query to cap result set size.
+  - CRITICAL-SEC-1d: Exception detail is NEVER returned to caller — only a
+    generic "Internal error." message. This prevents schema/path info leakage.
+  - CRITICAL-SEC-1e: Added censor loop that strips sensitive tokens from all
+    returned content before it is sent to the untrusted calling VM.
+  - CRITICAL-SEC-1f: Per-result character truncation prevents content dump.
+"""
+
+import sys
+import json
+import sqlite3
+import os
+
+# ─── Configuration ────────────────────────────────────────────────────────────
+
+DB_PATH = os.getenv("AEGIS_DB_PATH", "/var/lib/aegis/heimdall_context.db")
+
+# Hard cap on stdin read — prevents DoS via arbitrarily large payloads
+MAX_INPUT_BYTES = 4096
+
+# Maximum length of each individual result snippet returned to caller
+MAX_RESULT_CHARS = 1024
+
+# Maximum number of DB rows returned per query
+MAX_RESULTS = 5
+
+# Maximum acceptable query length after whitelist sanitization
+MAX_QUERY_LEN = 256
+
+# Sensitive tokens that must NEVER appear in responses to guest AppVMs.
+# This is the censor loop required by spec §4 ("Content Security & Censor Loop").
+# Extend this list as the system evolves.
+CENSORED_TOKENS = [
+    "sys-firewall", "sys-net", "sys-whonix",
+    "dom0", "qubes-dom0",
+    "password", "passwd", "secret", "private_key", "luks",
+    "encryption", "decrypt", "api_key", "token",
+    "qubes.ConvertPDF", "qubes.Gpg",
+    "/etc/qubes",
+]
+
+
+# ─── Censor Logic ─────────────────────────────────────────────────────────────
+
+def censor(text: str) -> str:
+    """
+    Remove or redact sensitive tokens from context snippets before returning
+    them to the untrusted calling VM.
+
+    This implements the spec §4 Content Security & Censor Loop requirement:
+    "sanitizes any administrative metadata (e.g. usernames, encryption key
+    references, VM lists not related to the request)."
+    """
+    for token in CENSORED_TOKENS:
+        # Case-insensitive replacement
+        lower = text.lower()
+        idx = lower.find(token.lower())
+        while idx != -1:
+            text = text[:idx] + "[REDACTED]" + text[idx + len(token):]
+            lower = text.lower()
+            idx = lower.find(token.lower(), idx + len("[REDACTED]"))
+    return text
+
+
+# ─── Input Sanitization ───────────────────────────────────────────────────────
+
+def sanitize_query(raw: str) -> tuple[bool, str]:
+    """
+    Whitelist-sanitize the query string received from an untrusted VM.
+
+    Allowed characters: alphanumeric, spaces, hyphens, underscores, dots.
+    Everything else is stripped.
+
+    Returns (valid: bool, clean_query: str).
+    """
+    if not raw:
+        return False, ""
+
+    # Strip to allowed character set only
+    clean = "".join(
+        c for c in raw if c.isalnum() or c in " .-_"
+    ).strip()
+
+    if not clean:
+        return False, ""
+
+    if len(clean) > MAX_QUERY_LEN:
+        return False, ""
+
+    return True, clean
+
+
+# ─── Database Query ───────────────────────────────────────────────────────────
+
+def query_context(clean_query: str) -> str:
+    """
+    Perform a parameterized LIKE query against the knowledge DB.
+    Returns a JSON string to be printed to stdout → qrexec channel.
+    """
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn.set_trace_callback(None)  # Disable any query logging
+        cursor = conn.cursor()
+
+        # Parameterized query — prevents SQL injection at syntax level.
+        # LIMIT clause — prevents full-table content dump.
+        cursor.execute(
+            "SELECT content FROM knowledge WHERE topic LIKE ? LIMIT ?",
+            ("%" + clean_query + "%", MAX_RESULTS)
+        )
+        rows = cursor.fetchall()
+        conn.close()
+
+        if not rows:
+            return json.dumps({"status": "ok", "context": "No context found."})
+
+        # Truncate each result, then apply the censor loop
+        parts = [censor(row[0][:MAX_RESULT_CHARS]) for row in rows]
+        return json.dumps({"status": "ok", "context": "\n---\n".join(parts)})
+
+    except Exception:
+        # CRITICAL: Never return exception detail to an untrusted caller.
+        # Exception strings may contain DB schema names, file paths, etc.
+        return json.dumps({"status": "error", "message": "Internal error."})
+
+
+# ─── Entry Point ──────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    # Read with a hard byte cap — prevents DoS
+    raw_bytes = sys.stdin.buffer.read(MAX_INPUT_BYTES)
+    raw = raw_bytes.decode("utf-8", errors="replace").strip()
+
+    valid, clean = sanitize_query(raw)
+    if not valid:
+        print(json.dumps({"status": "error", "message": "Invalid query."}))
+        sys.exit(0)
+
+    print(query_context(clean))

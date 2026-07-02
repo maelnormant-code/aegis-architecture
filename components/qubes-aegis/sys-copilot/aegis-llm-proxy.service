@@ -1,0 +1,39 @@
+[Unit]
+Description=Aegis LLM Socket Proxy
+After=local-fs.target
+
+[Service]
+Type=simple
+User=aegis-copilot
+Group=aegis-copilot
+ExecStart=/usr/libexec/qubes-aegis/aegis-llm-proxy.sh
+Restart=always
+RestartSec=5
+
+# ── systemd Security Hardening ───────────────────────────────
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ReadWritePaths=/run/aegis
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+ProtectClock=yes
+
+# Automatically setup runtime socket directory with correct ownership
+RuntimeDirectory=aegis
+RuntimeDirectoryMode=0750
+
+[Install]
+WantedBy=multi-user.target

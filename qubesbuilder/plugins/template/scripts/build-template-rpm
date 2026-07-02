@@ -1,0 +1,37 @@
+#!/bin/bash
+
+ARTIFACTS_DIR="$1"
+TEMPLATE_NAME="$2"
+TEMPLATE_VERSION="$3"
+TEMPLATE_TIMESTAMP="$4"
+
+set -e
+if [ "${DEBUG}" == "1" ]; then
+    set -x
+fi
+
+if [ $# -ne 4 ]; then
+    echo "Usage: $0 <artifacts_dir> <template_name> <template_version> <template_timestamp>"
+    exit
+fi
+
+for var in ARTIFACTS_DIR TEMPLATE_NAME TEMPLATE_VERSION TEMPLATE_TIMESTAMP; do
+    if [ -z "${!var}" ] ; then
+        echo "$var is empty!"
+        exit 1
+    fi
+done
+
+BUILDER_SCRIPTS_DIR="$(dirname "$0")"
+
+# Create RPM
+rpmbuild --target noarch \
+         --define "template_name ${TEMPLATE_NAME}" \
+         --define "template_version ${TEMPLATE_VERSION}" \
+         --define "template_timestamp ${TEMPLATE_TIMESTAMP}" \
+         --define "_sourcedir ${ARTIFACTS_DIR}" \
+         --define "_topdir ${ARTIFACTS_DIR}/rpmbuild" \
+         --define "_tmppath ${ARTIFACTS_DIR}/rpmbuild/tmp" \
+         -bb "${BUILDER_SCRIPTS_DIR}"/../template.spec
+
+rm -rf "${ARTIFACTS_DIR}/qubeized_images/${TEMPLATE_NAME}"

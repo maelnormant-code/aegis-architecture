@@ -1,0 +1,63 @@
+# Qubes Aegis (AI Fork) Qrexec Policy
+# Filename prefix 30- places this BEFORE default Qubes policies (50-default).
+#
+# AUDIT FIXES APPLIED (2026-06-29):
+#   - aegis.GetContext: changed ask→allow (spec §5: context queries are Low/Zero friction)
+#   - Added per-service explicit deny lines (defense-in-depth against policy bleed-through)
+#   - Added missing qubes.ApplyAISystemState (spec §2: core validation pipeline)
+#   - Added explicit deny for @anyvm before catch-all
+
+# 1. Guest AppVMs → sys-copilot: Context queries (Low Risk — Zero Friction per spec §5)
+#    Only VMs tagged 'aegis-guest' by Dom0 Salt state may call this.
+aegis.GetContext   *  @tag:aegis-guest  sys-copilot  allow
+aegis.GetContext   *  @anyvm            @anyvm       deny
+
+# Guest AppVMs → sys-copilot: Heimdall chat or goal queries
+aegis.HeimdallChat *  @tag:aegis-guest  sys-copilot  allow
+aegis.HeimdallChat *  @anyvm            @anyvm       deny
+
+# 1.5 sys-copilot → sys-knowledge: RAG Knowledge Query
+aegis.KnowledgeQuery *  sys-copilot        sys-knowledge  allow
+aegis.KnowledgeQuery *  @anyvm             @anyvm         deny
+
+# 1.6 sys-copilot → Dom0: Request automated documentation rebuild
+aegis.RequestDocBuild *  sys-copilot  dom0  allow
+aegis.RequestDocBuild *  @anyvm       @anyvm  deny
+
+# 2. sys-copilot → sys-ai: LLM inference forwarding (no other VM may reach sys-ai)
+aegis.LLMProxy    *  sys-copilot        sys-ai       allow
+aegis.LLMProxy    *  @anyvm             @anyvm       deny
+
+# 2.2 Guest AppVMs → sys-copilot: LLM inference proxying (restricted to qubes-aware VMs)
+aegis.LLMProxyGuest *  @tag:aegis-guest  sys-copilot  allow
+aegis.LLMProxyGuest *  @anyvm            @anyvm       deny
+
+# 2.5 sys-copilot → sys-ai: Attestation verification
+aegis.AttestAI    *  sys-copilot        sys-ai       allow
+aegis.AttestAI    *  @anyvm             @anyvm       deny
+
+
+# 3. sys-copilot → Dom0: Sanitized read-only audit log streaming
+aegis.AuditLogRead *  sys-copilot       dom0         allow
+aegis.AuditLogRead *  @anyvm            @anyvm       deny
+
+# 3.5 sys-copilot → Dom0: Subagent delegation
+aegis.DelegateSubagent * sys-copilot dom0 allow
+aegis.DelegateSubagent * @anyvm @anyvm deny
+
+# 3.12 sys-copilot -> Dom0: Hardware-Aware AI Auto-Tuning
+aegis.ConfigureAI * sys-copilot dom0 allow
+aegis.ConfigureAI * @anyvm @anyvm deny
+
+# 3.13 sys-copilot -> Dom0: Manage PCI Devices for Context Awareness
+aegis.ManagePCI * sys-copilot dom0 allow
+aegis.ManagePCI * @anyvm @anyvm deny
+
+# 4. sys-copilot → Dom0: Salt state application (Medium/Grave risk — REQUIRES user prompt)
+#    default_target=dom0 ensures the policy engine does not redirect to another VM.
+#    TODO: Add rate-limiting wrapper script per spec §10D (max 1 request per 10 seconds)
+qubes.ApplyAISystemState  *  sys-copilot  dom0  ask default_target=dom0
+qubes.ApplyAISystemState  *  @anyvm       @anyvm  deny
+
+# 5. Catch-all: deny all remaining aegis.* traffic
+aegis.*           *  @anyvm             @anyvm       deny

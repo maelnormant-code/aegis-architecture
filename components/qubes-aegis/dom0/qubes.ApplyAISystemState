@@ -1,0 +1,411 @@
+#!/usr/bin/env python3
+"""
+qubes.ApplyAISystemState — Dom0 qrexec RPC handler.
+
+SECURITY CONTRACT:
+  - This script runs ONLY in Dom0, invoked by the qrexec daemon.
+  - The caller is sys-copilot (verified by qrexec policy in 30-aegis.policy).
+  - Input: a SaltStack .sls YAML payload on stdin (max 64KB).
+  - Output: exit code 0 = approved and applied; non-zero = rejected.
+
+FUNCTION:
+  1. Read YAML payload from sys-copilot via qrexec stdin.
+  2. Validate YAML syntax and module whitelist (spec §2.2).
+  3. Scan for forbidden patterns (cmd.run, shell exec, file writes).
+  4. Classify risk tier (Low/Medium/Grave) based on module content (spec §5).
+  5. Display Dom0 GUI confirmation dialog (via aegis-confirm.py).
+  6. If approved: write to a tmpfile under /var/run/qubes-aegis/ and apply
+     via 'qubesctl state.apply'.
+  7. If rejected: exit non-zero, log the attempt.
+
+IMPLEMENTS: spec §2 "The Validation Layer", spec §5 "Friction-Based Policy"
+FIXES: CRITICAL-REQ-1 (entire pipeline was absent)
+"""
+
+import sys
+import json
+import os
+import tempfile
+import subprocess
+import logging
+import time
+import fcntl
+
+# ─── Configuration ────────────────────────────────────────────────────────────
+
+# Absolute hard cap on incoming Salt state size from sys-copilot
+MAX_PAYLOAD_BYTES = 65536
+
+# Directory for temporary .sls files — cleaned up after each invocation
+TMPDIR = "/var/run/qubes-aegis"
+
+# Allowed Salt modules (strict whitelist per spec §2.2)
+ALLOWED_MODULES = frozenset({
+    "qvm.present",
+    "qvm.absent",
+    "qvm.prefs",
+    "qvm.firewall",
+    "qvm.tags",
+    "qvm.features",
+    "qvm.volume",
+    "qvm.start",
+    "qvm.shutdown",
+})
+
+# Forbidden text patterns — any occurrence in the raw payload causes rejection.
+# This is a belt-and-suspenders check in addition to the module whitelist.
+FORBIDDEN_PATTERNS = [
+    "cmd.run", "cmd.script", "cmd.shell", "cmd.call",
+    "file.managed", "file.append", "file.replace",
+    "module.run", "exec_",
+    "__import__", "os.system", "subprocess",
+    "eval(", "exec(",
+    "salt.cmd", "salt.function",
+    "/etc/sudoers", "/etc/qubes-rpc/", "/etc/qubes/policy",
+    "qubes.AdminVM", "qubes.vm.adminvm",
+]
+
+# Modules that trigger Grave-risk classification (spec §5)
+GRAVE_MODULES = frozenset({
+    "qvm.firewall",
+    "qvm.features",   # Can modify qrexec policy-adjacent features
+    "qvm.volume",     # Can modify persistent storage
+})
+
+# Modules that trigger Medium-risk classification (spec §5)
+MEDIUM_MODULES = frozenset({
+    "qvm.present",
+    "qvm.absent",
+    "qvm.prefs",
+    "qvm.tags",
+    "qvm.start",
+    "qvm.shutdown",
+})
+
+# Rate limiting: minimum seconds between consecutive approved applications
+RATE_LIMIT_SECONDS = 10
+LAST_APPLY_FILE = os.path.join(TMPDIR, ".last_apply_ts")
+LOCK_FILE = os.path.join(TMPDIR, ".apply_lock")
+
+
+# ─── Logging ──────────────────────────────────────────────────────────────────
+
+logging.basicConfig(
+    filename="/var/log/qubes-aegis/apply-ai-state.log",
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
+log = logging.getLogger("qubes.ApplyAISystemState")
+
+
+# ─── Rate Limiting ────────────────────────────────────────────────────────────
+
+def check_and_update_rate_limit() -> bool:
+    """
+    Acquire lock, check rate limit, and update the timestamp immediately if allowed.
+    This prevents race conditions and popup storms.
+    """
+    try:
+        # Open/create lock file
+        lock_fd = os.open(LOCK_FILE, os.O_CREAT | os.O_WRONLY, 0o600)
+        # Acquire exclusive lock
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    except Exception as e:
+        log.error("Failed to acquire rate limit lock: %s", e)
+        return False
+
+    try:
+        now = time.time()
+        last_ts = 0.0
+        if os.path.exists(LAST_APPLY_FILE):
+            try:
+                with open(LAST_APPLY_FILE, "r") as f:
+                    last_ts = float(f.read().strip())
+            except Exception:
+                pass
+        
+        elapsed = now - last_ts
+        if elapsed < RATE_LIMIT_SECONDS:
+            return False
+        
+        # Update timestamp immediately to lock out subsequent concurrent requests
+        with open(LAST_APPLY_FILE, "w") as f:
+            f.write(str(now))
+        return True
+    finally:
+        # Release lock and close file descriptor
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+
+# ─── YAML Validation ──────────────────────────────────────────────────────────
+
+def validate_payload(raw: str) -> tuple[bool, str]:
+    """
+    Validate the SaltStack YAML payload against the module whitelist and
+    forbidden pattern list.
+
+    Returns (valid: bool, reason: str).
+    """
+    # 1. Forbidden pattern scan on raw text (fast, belt-and-suspenders)
+    for pat in FORBIDDEN_PATTERNS:
+        if pat.lower() in raw.lower():
+            return False, f"Forbidden pattern detected: '{pat}'"
+
+    # 2. YAML parse
+    try:
+        import yaml
+    except ImportError:
+        return False, "PyYAML not installed in Dom0. Cannot validate payload."
+
+    try:
+        data = yaml.safe_load(raw)
+    except yaml.YAMLError as e:
+        return False, f"YAML parse error: {e}"
+
+    if not isinstance(data, dict):
+        return False, "Payload top-level must be a YAML mapping."
+
+    # 3. Module whitelist check
+    for state_id, state_def in data.items():
+        if not isinstance(state_def, dict):
+            return False, f"State '{state_id}': value must be a mapping."
+        for module_key in state_def:
+            # Allow dotted module.function notation
+            if module_key not in ALLOWED_MODULES:
+                return False, (
+                    f"State '{state_id}': module '{module_key}' is not in "
+                    f"the allowed list: {sorted(ALLOWED_MODULES)}"
+                )
+
+    # 4. Tag scoping check
+    valid_tags, err_msg = validate_tag_scoping(data)
+    if not valid_tags:
+        return False, err_msg
+
+    return True, "OK"
+
+
+def validate_tag_scoping(data: dict) -> tuple[bool, str]:
+    """
+    Validates that the AI agent only modifies VMs tagged with 'aegis-guest'.
+    For new VMs, validates that they are tagged with 'aegis-guest' in the same transaction.
+    """
+    try:
+        import qubes
+        qapp = qubes.Qubes()
+    except ImportError:
+        # Graceful fallback for non-Qubes testing environments
+        log.warning("Qubes python module is missing. Bypassing VM tag scoping checks!")
+        return True, "OK"
+
+    # Collect all tags being enabled in this transaction
+    enabled_tags = {}  # vm_name -> set(tags)
+    for state_id, state_def in data.items():
+        if isinstance(state_def, dict) and 'qvm.tags' in state_def:
+            args = state_def['qvm.tags']
+            if isinstance(args, list):
+                vm_name = state_id
+                tags = []
+                for arg in args:
+                    if isinstance(arg, dict):
+                        if 'name' in arg:
+                            vm_name = arg['name']
+                        if 'enable' in arg:
+                            tags = arg['enable']
+                if isinstance(tags, list):
+                    if vm_name not in enabled_tags:
+                        enabled_tags[vm_name] = set()
+                    enabled_tags[vm_name].update(tags)
+
+    # Verify target VM for every state action
+    for state_id, state_def in data.items():
+        if not isinstance(state_def, dict):
+            continue
+            
+        for module, args in state_def.items():
+            vm_name = state_id
+            if isinstance(args, list):
+                for arg in args:
+                    if isinstance(arg, dict) and 'name' in arg:
+                        vm_name = arg['name']
+                        
+            # Skip if target is not a domain configuration (e.g. dom0 itself or default-template)
+            if vm_name == 'dom0' or vm_name == 'default-template':
+                continue
+
+            try:
+                vm = qapp.domains[vm_name]
+                # VM exists: must be tagged with 'aegis-guest'
+                if 'aegis-guest' not in vm.tags:
+                    return False, f"Access Denied: VM '{vm_name}' is not tagged as 'aegis-guest'."
+            except KeyError:
+                # VM does not exist (being created): must enable 'aegis-guest' tag in this transaction
+                tags_enabled = enabled_tags.get(vm_name, set())
+                if 'aegis-guest' not in tags_enabled:
+                    return False, f"Access Denied: New VM '{vm_name}' must be tagged with 'aegis-guest' in this transaction."
+
+    return True, "OK"
+
+
+def detects_suppression(data: dict) -> bool:
+    """
+    Check if the Salt state attempts to delete, stop, or disable critical Aegis VMs.
+    """
+    AEGIS_VMS = {'sys-copilot', 'sys-ai', 'sys-knowledge'}
+    SUPPRESSION_MODULES = {'qvm.absent', 'qvm.shutdown'}
+    
+    for state_id, state_def in data.items():
+        targets_aegis = False
+        if state_id in AEGIS_VMS:
+            targets_aegis = True
+            
+        if isinstance(state_def, dict):
+            for mod_name, mod_args in state_def.items():
+                if isinstance(mod_args, list):
+                    for arg in mod_args:
+                        if isinstance(arg, dict) and arg.get('name') in AEGIS_VMS:
+                            targets_aegis = True
+                            
+                if targets_aegis and mod_name in SUPPRESSION_MODULES:
+                    return True
+                    
+                if targets_aegis and mod_name == 'qvm.prefs':
+                    if isinstance(mod_args, list):
+                        for arg in mod_args:
+                            if isinstance(arg, dict) and arg.get('autostart') is False:
+                                return True
+    return False
+
+
+# ─── Risk Classification ──────────────────────────────────────────────────────
+
+def classify_risk(raw: str, data: dict) -> str:
+    """
+    Determine risk tier based on which Salt modules are used (spec §5).
+    Risk classification is performed IN DOM0, never trusted from the caller.
+
+    Returns: "low" | "medium" | "grave"
+    """
+    if detects_suppression(data):
+        return "grave"
+
+    modules_used = set()
+    for state_def in data.values():
+        if isinstance(state_def, dict):
+            modules_used.update(state_def.keys())
+
+    if modules_used & GRAVE_MODULES:
+        return "grave"
+    if modules_used & MEDIUM_MODULES:
+        return "medium"
+    return "low"
+
+
+# ─── Human Summary ────────────────────────────────────────────────────────────
+
+def build_summary(data: dict) -> str:
+    """Build a human-readable plaintext summary of the proposed Salt states."""
+    lines = []
+    for state_id, state_def in data.items():
+        if isinstance(state_def, dict):
+            for module, params in state_def.items():
+                param_str = json.dumps(params, indent=2)
+                lines.append(f"[{module}] {state_id}:\n{param_str}")
+    return "\n\n".join(lines) if lines else "(no parseable actions)"
+
+
+# ─── Main ─────────────────────────────────────────────────────────────────────
+
+def main() -> None:
+    os.makedirs(TMPDIR, exist_ok=True)
+    os.makedirs("/var/log/qubes-aegis", exist_ok=True)
+
+    # 1. Read payload with hard size cap
+    try:
+        raw = sys.stdin.buffer.read(MAX_PAYLOAD_BYTES).decode("utf-8", errors="replace")
+    except Exception as e:
+        log.error("Failed to read stdin: %s", e)
+        sys.exit(1)
+
+    if not raw.strip():
+        log.warning("Empty payload received from sys-copilot.")
+        sys.exit(1)
+
+    # 2. Rate limit check
+    if not check_and_update_rate_limit():
+        log.warning("Rate limit exceeded — rejecting request.")
+        print("RATE_LIMIT_EXCEEDED", file=sys.stderr)
+        sys.exit(1)
+
+    # 3. Validate
+    valid, reason = validate_payload(raw)
+    if not valid:
+        log.warning("Payload validation failed: %s", reason)
+        print(f"VALIDATION_FAILED: {reason}", file=sys.stderr)
+        sys.exit(1)
+
+    # 4. Parse for risk classification and summary (safe — already validated)
+    import yaml
+    data = yaml.safe_load(raw)
+    risk = classify_risk(raw, data)
+    summary = build_summary(data)
+    if detects_suppression(data):
+        summary = (
+            "WARNING: The proposed configuration state will delete, stop, or disable critical "
+            "Aegis AI infrastructure (e.g. sys-copilot/sys-ai/sys-knowledge). Confirming this "
+            "will suppress Aegis.\n\n" + summary
+        )
+
+    log.info("Validated Salt payload (risk=%s): %s", risk, summary[:500])
+
+    # 5. Display Dom0 GUI confirmation — risk level set HERE in Dom0
+    confirm_ret = subprocess.call([
+        "/usr/libexec/qubes-aegis/aegis-confirm.py",
+        risk,
+        summary
+    ])
+    if confirm_ret != 0:
+        log.info("User rejected the action (risk=%s).", risk)
+        sys.exit(1)
+
+    # 6. Write to controlled tmpfile and apply via qubesctl
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".sls",
+            dir=TMPDIR,
+            prefix="aegis-apply-",
+            delete=False
+        ) as f:
+            f.write(raw)
+            tmpname = f.name
+        os.chmod(tmpname, 0o600)
+    except Exception as e:
+        log.error("Failed to write tmpfile: %s", e)
+        sys.exit(1)
+
+    try:
+        result = subprocess.run(
+            ["qubesctl", "--skip-dom0", "state.apply", tmpname],
+            capture_output=True,
+            text=True,
+            timeout=300
+        )
+        if result.returncode == 0:
+            log.info("qubesctl applied successfully: %s", result.stdout[:500])
+        else:
+            log.error("qubesctl failed (rc=%d): %s", result.returncode, result.stderr[:500])
+            sys.exit(1)
+    except subprocess.TimeoutExpired:
+        log.error("qubesctl timed out after 300s.")
+        sys.exit(1)
+    finally:
+        try:
+            os.unlink(tmpname)
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    main()

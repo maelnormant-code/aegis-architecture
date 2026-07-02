@@ -1,0 +1,44 @@
+[Unit]
+Description=Aegis Heimdall Agent Loop (sys-copilot)
+Documentation=man:aegis-heimdall(8)
+After=local-fs.target
+Requires=aegis-llm-proxy.service
+
+[Service]
+Type=simple
+User=aegis-copilot
+Group=aegis-copilot
+
+ExecStart=/usr/bin/python3 /usr/libexec/qubes-aegis/heimdall/heimdall-agent.py
+Restart=always
+RestartSec=5
+
+# State and runtime directories automatically created and managed by systemd
+StateDirectory=aegis
+StateDirectoryMode=0750
+RuntimeDirectory=aegis
+RuntimeDirectoryMode=0750
+
+# ── Hardening ────────────────────────────────────────────
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ReadWritePaths=/var/lib/aegis /run/aegis
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET
+RestrictNamespaces=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+ProtectClock=yes
+
+[Install]
+WantedBy=multi-user.target

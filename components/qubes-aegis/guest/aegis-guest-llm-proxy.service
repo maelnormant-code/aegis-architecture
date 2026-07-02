@@ -1,0 +1,22 @@
+[Unit]
+Description=Aegis Guest LLM Local Proxy (localhost:8080)
+After=qubes-sysinit.service
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/qubes-aegis/aegis-guest-llm-proxy.sh
+Restart=on-failure
+RestartSec=5
+User=user
+Group=user
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+RestrictAddressFamilies=AF_UNIX AF_INET
+RestrictNamespaces=true
+
+[Install]
+WantedBy=multi-user.target

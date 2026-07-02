@@ -1,0 +1,36 @@
+#!/usr/bin/env python3
+import sys
+import json
+import subprocess
+
+def main():
+    try:
+        data = json.loads(sys.stdin.read(1024))
+        vm = data.get("vm")
+        action = data.get("action")
+        pci_id = data.get("pci_id")
+        
+        if not vm or not action or not pci_id:
+            print(json.dumps({"error": "Missing vm, action, or pci_id"}))
+            return
+            
+        if action not in ["attach", "detach"]:
+            print(json.dumps({"error": "Action must be attach or detach"}))
+            return
+            
+        # Using --persistent=False so that intermittent hardware isn't permanently locked to the VM across reboots
+        if action == "attach":
+            proc = subprocess.run(["qvm-pci", "attach", "--persistent=False", vm, pci_id], capture_output=True, text=True)
+        else:
+            proc = subprocess.run(["qvm-pci", "detach", vm, pci_id], capture_output=True, text=True)
+            
+        if proc.returncode != 0:
+            print(json.dumps({"error": proc.stderr.strip()}))
+            return
+            
+        print(json.dumps({"result": f"Successfully {action}ed PCI device {pci_id} for {vm}"}))
+    except Exception as e:
+        print(json.dumps({"error": str(e)}))
+
+if __name__ == "__main__":
+    main()

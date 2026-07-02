@@ -1,0 +1,39 @@
+[Unit]
+Description=Aegis Documentation Request Forwarder (sys-copilot)
+Documentation=man:aegis-doc-forwarder(8)
+After=local-fs.target aegis-heimdall.service
+Wants=aegis-heimdall.service
+
+[Service]
+Type=simple
+User=aegis-copilot
+Group=aegis-copilot
+
+ExecStart=/usr/bin/python3 /usr/libexec/qubes-aegis/aegis-doc-forwarder.py
+
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=15
+
+# ── Hardening ─────────────────────────────────────────────
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+# Needs write access to offset + log files, and read of watch file
+ReadWritePaths=/var/lib/aegis /var/log
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+ProtectClock=yes
+
+[Install]
+WantedBy=multi-user.target

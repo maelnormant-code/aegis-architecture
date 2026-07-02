@@ -1,0 +1,6 @@
+base:
+  dom0:
+    - aegis.init
+    - aegis.sys-ai
+    - aegis.sys-knowledge
+    - aegis.sys-copilot

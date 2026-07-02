@@ -1,0 +1,55 @@
+[Unit]
+Description=Aegis LLaMA Inference Server
+# AUDIT FIX (2026-06-29):
+#   - LOW-ARCH-3:  Replaced After=network.target with After=local-fs.target.
+#                  sys-ai has NetVM: none — network.target never becomes active,
+#                  causing systemd to hang for 90 seconds at every boot.
+#   - MEDIUM-ISO-3: Added full systemd hardening directives.
+#   - MEDIUM-REQ-8: Model path changed to LVM mount point (spec §10C).
+#                   Requires qvm-block attach sys-ai dom0:llm-weights at boot.
+After=local-fs.target
+
+[Service]
+Type=simple
+# MEDIUM-REQ-8: Model loaded from read-only LVM block device, not private FS.
+# Configure the LVM volume in Dom0: lvcreate -L 50G -n llm-weights qubes_dom0
+# Attach at boot via qvm.volume Salt state or qubesctl block attach.
+ExecStartPre=/bin/bash -c "sha256sum /mnt/llm-weights/model.gguf | awk '{print $1}' > /run/aegis/model_hash || true"
+ExecStart=/usr/bin/llama-server \
+    --model /mnt/llm-weights/model.gguf \
+    --host 127.0.0.1 \
+    --port 8080 \
+    --ctx-size 65536
+Restart=on-failure
+RestartSec=5
+
+# Dedicated service account — do NOT run inference as the 'user' account
+User=aegis-ai
+Group=aegis-ai
+
+RuntimeDirectory=aegis
+# ── systemd Security Hardening (MEDIUM-ISO-3) ───────────────────────────────
+# Prevent privilege escalation via setuid binaries
+NoNewPrivileges=true
+# Drop all Linux capabilities
+CapabilityBoundingSet=
+# Isolate /tmp from the rest of the system
+PrivateTmp=true
+# Make the root filesystem read-only; only declared paths are writable
+ProtectSystem=strict
+# Block access to home directories
+ProtectHome=true
+# Limit socket address families to Unix and IPv4 only
+RestrictAddressFamilies=AF_UNIX AF_INET
+# Prevent namespace creation (CLONE_* calls)
+RestrictNamespaces=true
+# Allow W^X pages needed by llama.cpp's JIT/tensor backends
+# Set to true only if llama.cpp is compiled without GPU/JIT backends
+MemoryDenyWriteExecute=false
+# Allow only standard service syscalls
+SystemCallFilter=@system-service @ipc
+# Limit to a standard system call error for any denied syscall
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

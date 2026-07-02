@@ -1,0 +1,103 @@
+git:
+  baseurl: https://github.com
+  prefix: qubesos/qubes-
+  branch: main
+
+backend-vmm: xen
+debug: true
+verbose: true
+qubes-release: r4.2
+
+cache:
+  vm-archlinux:
+    packages:
+      - bridge-utils
+      - conntrack-tools
+      - dconf
+      - desktop-file-utils
+      - fakeroot
+      - gawk
+      - gcc
+      - git
+      - gnome-packagekit
+      - graphicsmagick
+      - haveged
+      - iasl
+      - iproute2
+      - iptables
+      - librsvg
+      - libsystemd
+      - libutil-linux
+      - libx11
+      - lsb-release
+      - lzo
+      - make
+      - make
+      - networkmanager
+      - nftables
+      - notification-daemon
+      - ntp
+      - openssl
+      - pacman-contrib
+      - pandoc
+      - parted
+      - patch
+      - pixman
+      - pkg-config
+      - procps-ng
+      - python
+      - python-dbus
+      - python-gobject
+      - python-lxml
+      - python-setuptools
+      - python-xdg
+      - sed
+      - shared-mime-info
+      - socat
+      - tinyproxy
+      - wget
+      - xdg-utils
+      - yajl
+      - zenity
+      - blas
+      - cblas
+      - lapack
+      - libimagequant
+      - libraqm
+      - openjpeg2
+      - python-cairo
+      - python-numpy
+      - python-pillow
+
+distributions:
+  - vm-archlinux
+
+templates:
+  - archlinux:
+      dist: archlinux
+
+components:
+  - builder-archlinux:
+      packages: False
+  - vmm-xen
+  - core-vchan-xen
+  - core-qubesdb
+  - core-qrexec
+  - linux-utils
+  - core-agent-linux
+  - gui-common
+  - gui-agent-linux
+  - app-linux-split-gpg
+  - app-linux-input-proxy
+  - app-linux-usb-proxy
+  - meta-packages
+
+executor:
+ type: docker
+ options:
+   image: "qubes-builder-fedora:latest"
+
+stages:
+  - fetch
+  - prep
+  - build

@@ -1,0 +1,53 @@
+#!/bin/bash
+#
+# The Qubes OS Project, http://www.qubes-os.org
+#
+# Copyright (C) 2021 Frédéric Pierret (fepitre) <frederic@invisiblethingslab.com>
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License along
+# with this program. If not, see <https://www.gnu.org/licenses/>.
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+set -e
+set -o pipefail
+
+if [ "${DEBUG}" == 1 ]; then
+    set -x
+fi
+
+if test $# -ne 2; then
+	echo "Please provide spec file and dist tag to query."
+	exit 1
+fi
+
+SPEC_FILE="$1"
+DIST_TAG="$2"
+
+rpm_defines=(--define "dist .${DIST_TAG}")
+
+if [ "$(type -t set_rpm_defines)" = "function" ]; then
+    set_rpm_defines "$DIST_TAG"
+fi
+
+RPM_OPS=("${rpm_defines[@]}")
+
+# Manually add debuginfo packages in addition to standard query, and then
+# filter duplicates. This way both static (defined expliticly in spec) and
+# dynamic ones are handled.
+# see https://github.com/rpm-software-management/rpm/issues/1878
+{
+rpmspec --builtrpms "${RPM_OPS[@]}" -q --qf '%{name}-%{version}-%{release}.%{arch}.rpm\n' "${SPEC_FILE}"
+rpmspec --builtrpms "${RPM_OPS[@]}" -q --qf '%{name}-debuginfo-%{version}-%{release}.%{arch}.rpm\n' "${SPEC_FILE}" | grep -v -- '-devel\|-debuginfo-debuginfo\|-debugsource-debuginfo' 2>/dev/null || true
+rpmspec --builtrpms "${RPM_OPS[@]}" -q --qf '%{name}-debugsource-%{version}-%{release}.%{arch}.rpm\n' "${SPEC_FILE}" | grep -v -- '-devel\|-debuginfo-debugsource\|-debugsource-debugsource' 2>/dev/null || true
+} | sort | uniq

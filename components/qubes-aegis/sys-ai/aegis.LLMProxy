@@ -1,0 +1,7 @@
+#!/bin/bash
+# aegis.LLMProxy — qrexec RPC handler running in sys-ai.
+# Bridges the incoming qrexec stream directly to localhost:8080.
+
+set -euo pipefail
+
+exec socat - TCP:127.0.0.1:8080

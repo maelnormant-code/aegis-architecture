@@ -1,0 +1,96 @@
+#!/bin/bash
+#
+# The Qubes OS Project, http://www.qubes-os.org
+#
+# Copyright (C) 2012 Frédéric Pierret (fepitre) <frederic@invisiblethingslab.com>
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License along
+# with this program. If not, see <https://www.gnu.org/licenses/>.
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+set -e
+set -o pipefail
+
+if [ "${DEBUG}" == 1 ]; then
+    set -x
+fi
+
+print_usage() {
+    cat >&2 <<USAGE
+Usage: $0 release fullname output_dir
+Create Qubes repository skeleton for Debian distributions family
+USAGE
+}
+
+if [ $# -lt 3 ]; then
+    print_usage
+    exit 1
+fi
+
+release="$1"
+fullname="$2"
+output_dir="$3"
+
+if [ "${fullname}" == "debian" ]; then
+    name="Debian"
+    dists=(buster bullseye bookworm trixie forky)
+elif [ "${fullname}" == "ubuntu" ]; then
+    name="Ubuntu"
+    dists=(bionic focal jammy lunar noble)
+else
+    echo "Unsupported distribution."
+    exit 1
+fi
+
+reprepro_version="$(LC_ALL=C reprepro --version 2>&1)"
+reprepro_version="${reprepro_version#reprepro: This is reprepro version }"
+append_components=""
+if [ "$(printf '%s\n' "$reprepro_version" "5.4.0" | sort -V | head -n1)" = "5.4.0" ]; then
+    append_components=$'\nDDebComponents: main'
+fi
+
+mkdir -p "${output_dir}"
+
+mkdir -p "${output_dir}/$release/vm/"{conf,db,dists,pool}
+
+rm -f "${output_dir}/$release/vm/conf/distributions"
+for dist in "${dists[@]}"; do
+    for repo in current current-testing security-testing unstable; do
+        label_suffix=""
+        codename_suffix=""
+        if [ "$repo" == "current-testing" ]; then
+            label_suffix=" (updates candidates)"
+            codename_suffix="-testing"
+        fi
+        if [ "$repo" == "security-testing" ]; then
+            label_suffix=" (security updates candidates)"
+            codename_suffix="-securitytesting"
+        fi
+        if [ "$repo" == "unstable" ]; then
+            label_suffix=" (experimental)"
+            codename_suffix="-unstable"
+        fi
+        cat <<EOF >>"${output_dir}/$release/vm/conf/distributions"
+Origin: Qubes OS ${name}
+Label: Qubes ${name}${label_suffix}
+Codename: ${dist}${codename_suffix}
+AlsoAcceptFor: ${dist}
+Architectures: amd64 source
+Components: main${append_components}
+Description: Apt repository with Qubes OS ${release} domU support tools for ${name} ${dist}
+Tracking: all includebuildinfos
+
+EOF
+    done
+done

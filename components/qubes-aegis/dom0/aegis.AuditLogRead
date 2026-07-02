@@ -1,0 +1,81 @@
+#!/bin/bash
+# aegis.AuditLogRead — Dom0 qrexec RPC service handler.
+#
+# SECURITY CONTRACT:
+#   - This script runs in Dom0, invoked by the qrexec daemon.
+#   - Caller is sys-copilot (verified by 30-aegis.policy).
+#   - Output goes to stdout → qrexec channel → sys-copilot stdin.
+#   - NO intermediate files — streaming pipeline eliminates TOCTOU race.
+#   - Sensitive fields are REDACTED before output (spec §7 censor requirement).
+#
+# AUDIT FIXES (2026-06-29):
+#   - CRITICAL-REQ-3: This file was missing entirely. aegis-audit-export.sh
+#     wrote to a file but there was no qrexec handler to stream it. This
+#     script replaces that pattern with a direct streaming pipeline.
+#   - HIGH-PRIV-2:   Removed intermediate file (TOCTOU race eliminated).
+#                    Censor filter now applied inline before output.
+#
+# IMPLEMENTS: spec §7 "qubes.GetAdminLogs read-only service"
+
+set -euo pipefail
+
+# Stream recent audit events, redacting sensitive fields inline.
+# The python3 censor filter runs in a restricted process context.
+(ausearch -ts recent --format json 2>/dev/null || true) \
+| python3 -c "
+import sys
+import json
+
+# Fields to redact from audit event objects before sending to sys-copilot.
+# This is the spec §4 Content Security & Censor Loop for audit data.
+REDACT_KEYS = frozenset({
+    'uid', 'auid', 'euid', 'suid', 'fsuid',
+    'gid', 'egid', 'sgid', 'fsgid',
+    'ses',          # Audit session ID
+    'hostname',     # May reveal internal hostnames
+    'addr',         # Source IP addresses
+    'terminal',     # TTY names
+    'key',          # Audit rule keys (may reveal what is being monitored)
+})
+
+# Event types to suppress entirely (too sensitive for sys-copilot)
+SUPPRESSED_TYPES = frozenset({
+    'CRYPTO_KEY_USER',
+    'USER_AUTH',
+    'CRED_ACQ',
+    'CRED_DISP',
+    'LOGIN',
+    'SYSCALL',      # Raw syscall events — too verbose and reveal too much
+})
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        obj = json.loads(line)
+
+        # Suppress entire event types
+        event_type = obj.get('type', '')
+        if event_type in SUPPRESSED_TYPES:
+            continue
+
+        # Redact sensitive field values
+        for key in REDACT_KEYS:
+            if key in obj:
+                obj[key] = '[REDACTED]'
+
+        # Redact path values that look like absolute filesystem paths
+        # outside of /var/log to avoid leaking sensitive file access info
+        for path_key in ('exe', 'proctitle', 'comm'):
+            val = obj.get(path_key, '')
+            if isinstance(val, str) and val.startswith('/') and not val.startswith('/var/log'):
+                obj[path_key] = '[PATH_REDACTED]'
+
+        print(json.dumps(obj))
+        sys.stdout.flush()
+
+    except (json.JSONDecodeError, Exception):
+        # Skip malformed lines silently — never forward parse errors
+        continue
+"

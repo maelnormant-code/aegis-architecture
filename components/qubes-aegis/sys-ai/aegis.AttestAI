@@ -1,0 +1,57 @@
+#!/bin/bash
+# aegis.AttestAI — Runs in sys-ai to provide hardware trust verification to sys-copilot.
+# Computes SHA256 of the binary and model, and includes PCR 10 if vTPM is available.
+
+set -euo pipefail
+
+LLAMA_BIN="${AEGIS_LLAMA_BIN:-/usr/bin/llama-server}"
+MODEL_FILE="${AEGIS_MODEL_FILE:-/mnt/llm-weights/model.gguf}"
+TPM_DEV="${AEGIS_TPM_DEV:-/dev/tpm0}"
+
+to_hex_or_null() {
+    local val="$1"
+    # Strip any whitespace
+    val=$(echo "$val" | tr -d '[:space:]')
+    if [[ "$val" =~ ^[0-9a-fA-F]+$ ]]; then
+        echo "\"$val\""
+    else
+        echo "null"
+    fi
+}
+
+llama_hash="null"
+if [ -f "$LLAMA_BIN" ]; then
+    raw_hash=$(sha256sum "$LLAMA_BIN" | awk '{print $1}' || echo "")
+    llama_hash=$(to_hex_or_null "$raw_hash")
+fi
+
+model_hash="null"
+if [ -f "/run/aegis/model_hash" ]; then
+    raw_hash=$(cat /run/aegis/model_hash)
+    model_hash=$(to_hex_or_null "$raw_hash")
+elif [ -f "$MODEL_FILE" ]; then
+    raw_hash=$(sha256sum "$MODEL_FILE" | awk '{print $1}' || echo "")
+    model_hash=$(to_hex_or_null "$raw_hash")
+fi
+
+pcr10="null"
+if [ -e "$TPM_DEV" ] && [ -f "/sys/class/tpm/tpm0/pcr-sha256/10" ]; then
+    pcr_val=$(cat /sys/class/tpm/tpm0/pcr-sha256/10 2>/dev/null || echo "")
+    pcr10=$(to_hex_or_null "$pcr_val")
+fi
+
+timestamp=$(date +%s)
+
+# Timestamp is an integer, so we can validate it matches only digits
+if [[ ! "$timestamp" =~ ^[0-9]+$ ]]; then
+    timestamp=0
+fi
+
+cat <<EOF
+{
+  "llama_sha256": $llama_hash,
+  "model_sha256": $model_hash,
+  "pcr10": $pcr10,
+  "timestamp": $timestamp
+}
+EOF

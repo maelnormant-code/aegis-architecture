@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+"""aegis.KnowledgeQuery — qrexec RPC handler (runs in sys-knowledge).
+
+Receives a query string on stdin from sys-copilot, looks up relevant
+context from the local knowledge.db (SQLite FTS5), and returns
+sanitised snippets on stdout.
+
+Security notes:
+  - Input is capped at 4 KiB.
+  - Query is sanitized via character whitelist.
+  - Output is scrubbed for prompt-injection markers and sensitive tokens.
+  - Database is opened in read-only mode.
+"""
+
+import json
+import os
+import re
+import sqlite3
+import sys
+
+MAX_INPUT = 4096
+DB_PATH = "/var/lib/aegis/knowledge.db"
+MAX_RESULTS = 10
+MAX_SNIPPET_LEN = 512
+MAX_QUERY_LEN = 256
+
+# ── Prompt-injection censor patterns ────────────────────────
+CENSOR_PATTERNS = [
+    re.compile(r"ignore\s+(all\s+|the\s+)?(previous\s+)?(instructions|directives|rules|system\s+prompt)", re.I),
+    re.compile(r"do\s+not\s+follow\s+(any\s+)?(previous\s+)?(instructions|directives|rules)", re.I),
+    re.compile(r"<\|im_start\|>", re.I),
+    re.compile(r"<\|im_end\|>", re.I),
+    re.compile(r"\[/?INST\]", re.I),
+    re.compile(r"<{2,3}SYS>{2,3}", re.I),
+    # Advanced patterns from NousResearch agent-governance-toolkit
+    re.compile(r"override\s+(the\s+)?(previous|above|original)", re.I),
+    re.compile(r"instead\s+of\s+(the\s+)?(above|previous|described)", re.I),
+    re.compile(r"actually\s+do", re.I),
+    re.compile(r"\bsystem\s*:", re.I),
+    re.compile(r"\bassistant\s*:", re.I),
+    re.compile(r"disregard\s+(all\s+)?(above|prior|previous)", re.I),
+    re.compile(r"you\s+are\b", re.I),
+    re.compile(r"your\s+task\s+is\b", re.I),
+    re.compile(r"respond\s+with\b", re.I),
+    re.compile(r"always\s+return\b", re.I),
+    re.compile(r"you\s+must\b", re.I),
+    re.compile(r"your\s+role\s+is\b", re.I),
+]
+
+# ── Sensitive tokens that must never appear in responses ────
+CENSORED_TOKENS = [
+    "sys-firewall", "sys-net", "sys-whonix",
+    "dom0", "qubes-dom0",
+    "password", "passwd", "secret", "private_key", "luks",
+    "encryption", "decrypt", "api_key", "token",
+    "qubes.ConvertPDF", "qubes.Gpg",
+    "/etc/qubes",
+]
+
+
+def sanitise_input(raw: str):
+    """Whitelist-sanitize the query string. Returns (valid, clean)."""
+    if not raw:
+        return False, ""
+    clean = "".join(c for c in raw if c.isalnum() or c in " .-_").strip()
+    if not clean or len(clean) > MAX_QUERY_LEN:
+        return False, ""
+    return True, clean
+
+
+def censor_output(text: str) -> str:
+    """Remove prompt-injection patterns and sensitive tokens."""
+    for pat in CENSOR_PATTERNS:
+        text = pat.sub("[REDACTED]", text)
+    for tok in CENSORED_TOKENS:
+        text = re.sub(re.escape(tok), "[REDACTED]", text, flags=re.I)
+    return text[:MAX_SNIPPET_LEN]
+
+
+def main():
+    raw = sys.stdin.buffer.read(MAX_INPUT + 1)
+    if len(raw) > MAX_INPUT:
+        print(json.dumps({"status": "error", "message": "Input too large."}))
+        sys.exit(0)
+
+    query = raw.decode("utf-8", errors="replace").strip()
+    valid, clean = sanitise_input(query)
+    if not valid:
+        print(json.dumps({"status": "error", "message": "Invalid query."}))
+        sys.exit(0)
+
+    if not os.path.exists(DB_PATH):
+        print(json.dumps({"status": "error", "message": "Knowledge database not found."}))
+        sys.exit(0)
+
+    try:
+        conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT snippet(knowledge_fts, 1, '', '', '…', 64) "
+            "FROM knowledge_fts WHERE knowledge_fts MATCH ? LIMIT ?",
+            (clean, MAX_RESULTS),
+        )
+        rows = cur.fetchall()
+        conn.close()
+    except sqlite3.OperationalError:
+        rows = []
+    except Exception:
+        print(json.dumps({"status": "error", "message": "Internal error."}))
+        sys.exit(0)
+
+    snippets = [censor_output(r[0]) for r in rows]
+    print(json.dumps({"status": "ok", "results": snippets}))
+
+
+if __name__ == "__main__":
+    main()

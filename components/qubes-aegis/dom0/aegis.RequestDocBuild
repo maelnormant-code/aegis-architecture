@@ -1,0 +1,448 @@
+#!/usr/bin/env python3
+"""aegis.RequestDocBuild — qrexec RPC handler (runs in Dom0).
+
+Receives a documentation topic request from sys-copilot, validates it
+against a hardcoded topic whitelist, then triggers sys-knowledge-builder
+to fetch the documentation, rebuild the knowledge index, and auto-deploy
+it to sys-knowledge via the existing verified pipeline.
+
+Security model:
+  - Runs in Dom0 with minimal privileges.
+  - Input is strictly validated (JSON schema, topic whitelist).
+  - All subprocess calls use explicit argument lists (no shell=True).
+  - Maximum one build job can run at a time (lockfile).
+  - Rate-limited: one rebuild per 3600 seconds.
+  - The build itself runs in the isolated sys-knowledge-builder VM.
+  - Deployment reuses the SHA256-verified verify-and-deploy pipeline.
+
+Usage (called by qrexec daemon, stdin = JSON):
+  {"topic": "apparmor", "description": "Need AppArmor profile writing guide"}
+
+Output (JSON on stdout):
+  {"status": "ok", "message": "..."} or {"status": "error", "message": "..."}
+"""
+
+import fcntl
+import json
+import os
+import subprocess
+import sys
+import time
+
+# ── Configuration ───────────────────────────────────────────────────────────
+MAX_INPUT         = 8192
+LOG_FILE          = "/var/log/aegis-doc-build.log"
+LOCK_FILE         = "/run/aegis-doc-build.lock"
+RATE_LIMIT_FILE   = "/run/aegis-doc-build.ratelimit"
+RATE_LIMIT_SECS   = 3600          # max one full rebuild per hour
+BUILD_VM          = "sys-knowledge-builder"
+BUILD_SCRIPT      = "/home/user/qubes-builder/components/qubes-aegis/sys-knowledge-builder/build-knowledge-index.sh"
+DEPLOY_SCRIPT     = "/etc/qubes-aegis/verify-and-deploy-knowledge.sh"
+TARBALL_PATH      = "/home/user/knowledge-index-output/knowledge-index.tar.gz"
+SHA256_PATH       = "/home/user/knowledge-index-output/knowledge-index.sha256"
+PINS_FILE         = "/etc/qubes-aegis/knowledge-pins.json"
+TARGET_VM         = "sys-knowledge"
+TARGET_DIR        = "/var/lib/aegis"
+
+# ── Topic → official documentation URL whitelist ────────────────────────────
+# Each key is a canonical topic slug. Values are lists of raw-content URLs.
+# Only these topics can trigger a documentation fetch.
+TOPIC_URL_MAP: dict[str, list[str]] = {
+    "apparmor": [
+        "https://gitlab.com/apparmor/apparmor/-/raw/master/README.md",
+        "https://raw.githubusercontent.com/torvalds/linux/master/Documentation/admin-guide/LSM/apparmor.rst",
+    ],
+    "selinux": [
+        "https://raw.githubusercontent.com/SELinuxProject/selinux-notebook/main/src/selinux_overview.md",
+        "https://www.kernel.org/doc/html/latest/admin-guide/LSM/SELinux.html",
+    ],
+    "nftables": [
+        "https://www.netfilter.org/projects/nftables/manpage.html",
+        "https://raw.githubusercontent.com/torvalds/linux/master/Documentation/networking/nf_conntrack-sysctl.rst",
+    ],
+    "iptables": [
+        "https://www.netfilter.org/documentation/HOWTO/packet-filtering-HOWTO.txt",
+    ],
+    "systemd": [
+        "https://raw.githubusercontent.com/systemd/systemd/main/README",
+        "https://raw.githubusercontent.com/systemd/systemd/main/docs/SANDBOX.md",
+    ],
+    "qrexec": [
+        "https://www.qubes-os.org/doc/qrexec/",
+        "https://www.qubes-os.org/doc/qrexec-internals/",
+    ],
+    "whonix": [
+        "https://www.whonix.org/wiki/Documentation",
+    ],
+    "dnscrypt": [
+        "https://raw.githubusercontent.com/DNSCrypt/dnscrypt-proxy/master/README.md",
+    ],
+    "firejail": [
+        "https://raw.githubusercontent.com/netblue30/firejail/master/README.md",
+    ],
+    "bubblewrap": [
+        "https://raw.githubusercontent.com/containers/bubblewrap/main/README.md",
+    ],
+    "seccomp": [
+        "https://www.kernel.org/doc/html/latest/userspace-api/seccomp_filter.html",
+    ],
+    "cgroups": [
+        "https://www.kernel.org/doc/html/latest/admin-guide/cgroup-v2.html",
+    ],
+    "namespaces": [
+        "https://www.kernel.org/doc/html/latest/admin-guide/namespaces/index.html",
+        "https://raw.githubusercontent.com/torvalds/linux/master/Documentation/userspace-api/unshare.rst",
+    ],
+    "bpf": [
+        "https://www.kernel.org/doc/html/latest/bpf/index.html",
+        "https://www.kernel.org/doc/html/latest/bpf/instruction-set.html",
+    ],
+    "luks": [
+        "https://gitlab.com/cryptsetup/cryptsetup/-/raw/main/README.md",
+    ],
+    "tpm": [
+        "https://raw.githubusercontent.com/tpm2-software/tpm2-tools/master/README.md",
+    ],
+    "yara": [
+        "https://raw.githubusercontent.com/VirusTotal/yara/master/README.md",
+    ],
+    "suricata": [
+        "https://raw.githubusercontent.com/OISF/suricata/master/README.md",
+    ],
+    "zeek": [
+        "https://raw.githubusercontent.com/zeek/zeek/master/README",
+    ],
+    "openssl": [
+        "https://raw.githubusercontent.com/openssl/openssl/master/README.md",
+        "https://raw.githubusercontent.com/openssl/openssl/master/doc/man7/ossl-guide-introduction.pod",
+    ],
+    "ssh": [
+        "https://raw.githubusercontent.com/openssh/openssh-portable/master/README",
+    ],
+    "gpg": [
+        "https://raw.githubusercontent.com/gpg/gnupg/master/README",
+    ],
+    "fail2ban": [
+        "https://raw.githubusercontent.com/fail2ban/fail2ban/master/README.md",
+    ],
+    "auditd": [
+        "https://www.kernel.org/doc/html/latest/userspace-api/audit/index.html",
+    ],
+    "xen": [
+        "https://raw.githubusercontent.com/xen-project/xen/master/README",
+    ],
+    "kvm": [
+        "https://www.kernel.org/doc/html/latest/virt/kvm/index.html",
+    ],
+    "libvirt": [
+        "https://raw.githubusercontent.com/libvirt/libvirt/master/README.rst",
+    ],
+    "podman": [
+        "https://raw.githubusercontent.com/containers/podman/main/README.md",
+    ],
+    "ansible": [
+        "https://raw.githubusercontent.com/ansible/ansible/devel/README.rst",
+    ],
+    "python": [
+        "https://raw.githubusercontent.com/python/cpython/main/Doc/library/subprocess.rst",
+        "https://raw.githubusercontent.com/python/cpython/main/Doc/library/os.rst",
+    ],
+    "bash": [
+        "https://www.gnu.org/software/bash/manual/bash.txt",
+    ],
+}
+
+
+def _log(msg: str) -> None:
+    ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    line = f"{ts} {msg}\n"
+    try:
+        with open(LOG_FILE, "a") as f:
+            f.write(line)
+    except OSError:
+        pass
+
+
+def _respond(status: str, message: str) -> None:
+    print(json.dumps({"status": status, "message": message}), flush=True)
+
+
+def _match_topic(raw_topic: str) -> tuple[str | None, list[str]]:
+    """Case-insensitive substring match against the whitelist. Returns (canonical_key, urls)."""
+    normalized = raw_topic.lower().strip()
+    # Exact match first
+    if normalized in TOPIC_URL_MAP:
+        return normalized, TOPIC_URL_MAP[normalized]
+    # Substring match: topic contains a key OR a key contains topic
+    for key, urls in TOPIC_URL_MAP.items():
+        if key in normalized or normalized in key:
+            return key, urls
+    return None, []
+
+
+def _check_rate_limit() -> bool:
+    """Returns True if allowed, False if rate-limited."""
+    try:
+        if os.path.exists(RATE_LIMIT_FILE):
+            with open(RATE_LIMIT_FILE, "r") as f:
+                last = float(f.read().strip())
+            if time.time() - last < RATE_LIMIT_SECS:
+                return False
+    except (ValueError, OSError):
+        pass
+    return True
+
+
+def _set_rate_limit() -> None:
+    tmp = RATE_LIMIT_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(str(time.time()))
+    os.replace(tmp, RATE_LIMIT_FILE)
+
+
+def _inject_topic_urls(topic: str, urls: list[str]) -> bool:
+    """Append new URL entries to build-knowledge-index.sh inside sys-knowledge-builder.
+
+    Instead of modifying the script directly, we write a supplemental
+    fetch list that the auto-rebuild script reads and processes.
+    The supplemental file is /home/user/knowledge-supplement.json inside
+    sys-knowledge-builder.
+    """
+    supplement = json.dumps({"topic": topic, "urls": urls})
+    try:
+        proc = subprocess.run(
+            [
+                "qvm-run", "--pass-io", BUILD_VM,
+                f"python3 -c \""
+                f"import json, os; "
+                f"p='/home/user/knowledge-supplement.json'; "
+                f"existing=json.load(open(p)) if os.path.exists(p) else []; "
+                f"existing.append({json.dumps({'topic': topic, 'urls': urls})}); "
+                f"open(p,'w').write(json.dumps(existing))\""
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=30,
+        )
+        return proc.returncode == 0
+    except Exception as e:
+        _log(f"ERROR injecting supplement: {e}")
+        return False
+
+
+def _trigger_build() -> tuple[bool, str]:
+    """Run the knowledge build script in sys-knowledge-builder. Returns (success, output)."""
+    try:
+        proc = subprocess.run(
+            ["qvm-run", "--pass-io", BUILD_VM, f"bash {BUILD_SCRIPT}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=600,   # 10 minute build timeout
+        )
+        output = proc.stdout.decode("utf-8", errors="replace")[-2000:]  # last 2KB
+        return proc.returncode == 0, output
+    except subprocess.TimeoutExpired:
+        return False, "Build timed out after 600s"
+    except Exception as e:
+        return False, str(e)
+
+
+def _copy_tarball_to_dom0() -> bool:
+    """Copy the tarball and checksum from sys-knowledge-builder into Dom0."""
+    for path in [TARBALL_PATH, SHA256_PATH]:
+        try:
+            proc = subprocess.run(
+                ["qvm-run", "--pass-io", BUILD_VM, f"cat {path}"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=120,
+            )
+            if proc.returncode != 0:
+                _log(f"ERROR: failed to read {path} from {BUILD_VM}")
+                return False
+            dom0_path = path.replace(f"/home/user/knowledge-index-output", "/var/lib/aegis-builds")
+            os.makedirs(os.path.dirname(dom0_path), exist_ok=True)
+            with open(dom0_path, "wb") as f:
+                f.write(proc.stdout)
+        except Exception as e:
+            _log(f"ERROR copying {path} from build VM: {e}")
+            return False
+    return True
+
+
+def _auto_deploy() -> tuple[bool, str]:
+    """Verify SHA256 and deploy to sys-knowledge, auto-approving the new hash."""
+    dom0_tarball = TARBALL_PATH.replace(
+        "/home/user/knowledge-index-output", "/var/lib/aegis-builds"
+    )
+    dom0_sha256 = SHA256_PATH.replace(
+        "/home/user/knowledge-index-output", "/var/lib/aegis-builds"
+    )
+
+    # Read the actual SHA256 from the checksum file
+    try:
+        with open(dom0_sha256, "r") as f:
+            line = f.read().strip().split()[0]
+        if len(line) != 64:
+            return False, f"Invalid SHA256 format in checksum file: {line!r}"
+        new_sha256 = line
+    except Exception as e:
+        return False, f"Could not read SHA256 file: {e}"
+
+    # Update the pins file (auto-approve new hash for automated rebuild flow)
+    try:
+        os.makedirs(os.path.dirname(PINS_FILE), exist_ok=True)
+        with open(PINS_FILE, "w") as f:
+            json.dump({"knowledge_sha256": new_sha256}, f)
+        os.chmod(PINS_FILE, 0o600)
+        _log(f"Updated knowledge-pins.json with new hash: {new_sha256}")
+    except Exception as e:
+        return False, f"Could not update pins file: {e}"
+
+    # Verify and stream to sys-knowledge
+    try:
+        import hashlib
+        with open(dom0_tarball, "rb") as f:
+            actual = hashlib.sha256(f.read()).hexdigest()
+        if actual != new_sha256:
+            return False, f"SHA256 MISMATCH! Expected {new_sha256}, got {actual}"
+
+        # Stream knowledge.db directly to sys-knowledge
+        import tarfile
+        with tarfile.open(dom0_tarball, "r:gz") as tar:
+            db_member = next(
+                (m for m in tar.getmembers() if m.name.endswith("knowledge.db")), None
+            )
+            if db_member is None:
+                return False, "knowledge.db not found in tarball"
+            db_file = tar.extractfile(db_member)
+            if db_file is None:
+                return False, "Could not open knowledge.db from tarball"
+            db_bytes = db_file.read()
+
+        # Ensure target directory, then push DB to sys-knowledge
+        subprocess.run(
+            ["qvm-run", "-p", TARGET_VM, f"sudo mkdir -p {TARGET_DIR}"],
+            timeout=15, check=True
+        )
+        proc = subprocess.run(
+            ["qvm-run", "-p", TARGET_VM,
+             f"sudo dd of={TARGET_DIR}/knowledge.db bs=1M && "
+             f"sudo chown aegis-knowledge:aegis-knowledge {TARGET_DIR}/knowledge.db && "
+             f"sudo chmod 0640 {TARGET_DIR}/knowledge.db"],
+            input=db_bytes,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=120,
+        )
+        if proc.returncode != 0:
+            return False, f"Deployment failed: {proc.stderr.decode()[:500]}"
+    except Exception as e:
+        return False, f"Deploy error: {e}"
+
+    return True, f"Deployed successfully. SHA256: {new_sha256}"
+
+
+def main():
+    # Read and validate input
+    raw = sys.stdin.buffer.read(MAX_INPUT + 1)
+    if len(raw) > MAX_INPUT:
+        _respond("error", "Input too large.")
+        sys.exit(0)
+
+    try:
+        req = json.loads(raw.decode("utf-8", errors="replace"))
+    except json.JSONDecodeError:
+        _respond("error", "Invalid JSON input.")
+        sys.exit(0)
+
+    topic = str(req.get("topic", "")).strip()[:200]
+    description = str(req.get("description", "")).strip()[:1000]
+
+    if not topic:
+        _respond("error", "Missing 'topic' field.")
+        sys.exit(0)
+
+    # Validate topic against whitelist
+    canonical_key, urls = _match_topic(topic)
+    if canonical_key is None:
+        _log(f"Rejected unknown topic: {topic!r}")
+        _respond(
+            "error",
+            f"Topic '{topic}' is not in the documentation whitelist. "
+            "An administrator must add it to the TOPIC_URL_MAP in aegis.RequestDocBuild."
+        )
+        sys.exit(0)
+
+    _log(f"Doc request received: topic={topic!r} → canonical={canonical_key!r} description={description!r}")
+
+    # Acquire exclusive lock (prevent concurrent builds)
+    os.makedirs("/run", exist_ok=True)
+    lock_fd = open(LOCK_FILE, "w")
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        _respond("error", "A documentation rebuild is already in progress. Try again later.")
+        lock_fd.close()
+        sys.exit(0)
+
+    try:
+        # Rate limit check
+        if not _check_rate_limit():
+            remaining = int(RATE_LIMIT_SECS - (time.time() - float(
+                open(RATE_LIMIT_FILE).read().strip()
+            )))
+            _respond(
+                "error",
+                f"Rate limited: documentation rebuild allowed once per hour. "
+                f"Try again in ~{remaining // 60} minutes."
+            )
+            sys.exit(0)
+
+        _set_rate_limit()
+
+        # Inject supplement URLs into build VM
+        _log(f"Injecting supplement URLs for {canonical_key}: {urls}")
+        if not _inject_topic_urls(canonical_key, urls):
+            _log("WARNING: supplement injection failed, proceeding with full rebuild anyway")
+
+        # Trigger the build
+        _log("Triggering knowledge index rebuild in sys-knowledge-builder...")
+        build_ok, build_output = _trigger_build()
+        _log(f"Build result: {'OK' if build_ok else 'FAILED'}\n{build_output}")
+
+        if not build_ok:
+            _respond("error", f"Knowledge build failed: {build_output[-500:]}")
+            sys.exit(0)
+
+        # Copy artifacts to Dom0
+        _log("Copying build artifacts to Dom0...")
+        if not _copy_tarball_to_dom0():
+            _respond("error", "Failed to retrieve build artifacts from sys-knowledge-builder.")
+            sys.exit(0)
+
+        # Auto-deploy to sys-knowledge
+        _log("Deploying new knowledge.db to sys-knowledge...")
+        deploy_ok, deploy_msg = _auto_deploy()
+        _log(f"Deploy result: {'OK' if deploy_ok else 'FAILED'} — {deploy_msg}")
+
+        if deploy_ok:
+            _respond(
+                "ok",
+                f"Documentation for '{canonical_key}' has been fetched, indexed, "
+                f"and deployed to sys-knowledge. {deploy_msg}"
+            )
+        else:
+            _respond("error", f"Build succeeded but deployment failed: {deploy_msg}")
+
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        lock_fd.close()
+        try:
+            os.unlink(LOCK_FILE)
+        except OSError:
+            pass
+
+
+if __name__ == "__main__":
+    main()

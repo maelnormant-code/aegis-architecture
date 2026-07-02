@@ -1,0 +1,28 @@
+[Unit]
+Description=Aegis Gemini Cloud Inference Proxy
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/aegis-gemini-proxy
+Restart=on-failure
+RestartSec=5
+
+# Service account
+User=aegis-ai
+Group=aegis-ai
+
+# systemd Security Hardening
+NoNewPrivileges=true
+CapabilityBoundingSet=
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+RestrictAddressFamilies=AF_UNIX AF_INET
+RestrictNamespaces=true
+MemoryDenyWriteExecute=true
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,33 @@
+#!/usr/bin/env python3
+import sys
+import json
+import subprocess
+
+def main():
+    try:
+        data = json.loads(sys.stdin.read(1024))
+        mem = data.get("memory_mb", 4096)
+        vcpus = data.get("vcpus", 2)
+        model = data.get("target_model", "llama3")
+        
+        # Shut down sys-ai to modify hardware parameters
+        subprocess.run(["qvm-shutdown", "--wait", "sys-ai"], capture_output=True)
+        
+        # Optimize memory and CPU allocations
+        subprocess.run(["qvm-prefs", "sys-ai", "memory", str(mem)], capture_output=True)
+        subprocess.run(["qvm-prefs", "sys-ai", "maxmem", str(mem)], capture_output=True)
+        subprocess.run(["qvm-prefs", "sys-ai", "vcpus", str(vcpus)], capture_output=True)
+        
+        # Restart sys-ai
+        subprocess.run(["qvm-start", "sys-ai"], capture_output=True)
+        
+        # Issue command to sys-ai to ensure the pertinent model is pulled/active
+        cmd = f"ollama pull {model} >/dev/null 2>&1 || true"
+        subprocess.run(["qvm-run", "-u", "root", "--pass-io", "sys-ai", cmd], capture_output=True)
+        
+        print(json.dumps({"result": f"sys-ai optimized: {vcpus} vCPUs, {mem}MB RAM, model {model}. VM restarted and tuned."}))
+    except Exception as e:
+        print(json.dumps({"error": str(e)}))
+
+if __name__ == "__main__":
+    main()

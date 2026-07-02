@@ -1,0 +1,33 @@
+[Unit]
+Description=Aegis MCP Server (Guest AI Interface)
+# Runs inside guest AppVMs tagged as aegis-guest.
+# Provides the Model Context Protocol server that Heimdall/Goose uses
+# to issue context queries to sys-copilot via qrexec.
+#
+# AUDIT FIX (2026-06-29):
+#   - LOW-ARCH-4: This service unit was missing. aegis-guest-init.sh calls
+#     'systemctl start aegis-mcp.service' but no unit file existed, causing
+#     a silent boot failure.
+After=qubes-sysinit.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/libexec/qubes-aegis/aegis-mcp-server.py
+Restart=on-failure
+RestartSec=5
+User=user
+Group=user
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=true
+
+# MCP server communicates via stdin/stdout only — no network needed
+PrivateNetwork=false
+
+[Install]
+WantedBy=multi-user.target

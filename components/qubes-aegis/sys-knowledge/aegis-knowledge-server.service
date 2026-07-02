@@ -1,0 +1,41 @@
+[Unit]
+Description=Aegis Knowledge Query Server (sys-knowledge)
+Documentation=man:aegis-knowledge(8)
+After=local-fs.target
+
+[Service]
+Type=simple
+User=aegis-knowledge
+Group=aegis-knowledge
+
+# The qrexec daemon invokes aegis.KnowledgeQuery directly;
+# this service ensures the database is accessible and the
+# runtime environment is set up.
+ExecStart=/bin/true
+RemainAfterExit=yes
+
+Restart=no
+
+# ── Hardening ────────────────────────────────────────────
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ReadOnlyPaths=/var/lib/aegis
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+ProtectClock=yes
+
+[Install]
+WantedBy=multi-user.target
