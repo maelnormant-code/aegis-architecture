@@ -31,8 +31,22 @@ echo "[*] Extracting source..."
 tar xzf "$TARBALL"
 cd "llama.cpp-${LLAMA_VERSION}"
 
-echo "[*] Compiling statically..."
-make LLAMA_STATIC=1 -j$(nproc) llama-server
+echo "[*] Compiling statically with 3600s timeout..."
+if ! timeout 3600 make LLAMA_STATIC=1 -j$(nproc) llama-server > make_build.log 2>&1; then
+    echo "ERROR: Compilation failed or timed out! Compilation logs:"
+    cat make_build.log
+    exit 1
+fi
+
+if [ ! -f llama-server ]; then
+    echo "ERROR: llama-server binary not found after build!"
+    exit 1
+fi
+
+if ! file llama-server | grep -q ELF; then
+    echo "ERROR: llama-server binary is not a valid ELF executable!"
+    exit 1
+fi
 
 echo "[*] Saving build output..."
 OUTPUT_DIR="/home/user/llama-build-output"

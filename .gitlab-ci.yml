@@ -323,6 +323,23 @@ lint:
   variables:
     DIR: qubesbuilder
 
+preflight-checks:
+  stage: test
+  tags:
+    - vm
+  before_script:
+    - sudo dnf install -y pykickstart python3
+  script:
+    - ls -la conf/iso-*.ks || { echo "Missing Kickstart files"; exit 1; }
+    - ksvalidator conf/iso-online-testing.ks
+    - python3 -m py_compile patch_final.py
+    - cp components/qubes-aegis/sys-copilot/heimdall/heimdall_tools.py /tmp/heimdall_tools_orig.py
+    - python3 patch_final.py
+    - cp components/qubes-aegis/sys-copilot/heimdall/heimdall_tools.py /tmp/heimdall_tools_patched1.py
+    - python3 patch_final.py
+    - cmp /tmp/heimdall_tools_patched1.py components/qubes-aegis/sys-copilot/heimdall/heimdall_tools.py || { echo "Patch script is not idempotent!"; exit 1; }
+    - cp /tmp/heimdall_tools_orig.py components/qubes-aegis/sys-copilot/heimdall/heimdall_tools.py
+
 mypy:
   stage: test
   image: fedora:40

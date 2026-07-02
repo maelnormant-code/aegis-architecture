@@ -14,8 +14,14 @@ LOCAL_BIN="${DOM0_INCOMING_DIR}/llama-server"
 PINS_FILE="/etc/qubes-aegis/llama-build-pins.json"
 ATTESTATION_PINS_FILE="/etc/qubes-aegis/attestation-pins.json"
 
+# Validate that local binary exists and is non-empty
 if [ ! -f "$LOCAL_BIN" ]; then
     echo "ERROR: Local binary not found at $LOCAL_BIN"
+    exit 1
+fi
+
+if [ ! -s "$LOCAL_BIN" ]; then
+    echo "ERROR: Local binary at $LOCAL_BIN is empty (0 bytes)."
     exit 1
 fi
 
@@ -34,6 +40,11 @@ EXPECTED_BIN_SHA256=""
 mkdir -p "/etc/qubes-aegis"
 
 if [ -f "$PINS_FILE" ]; then
+    # Verify JSON parsing of the pins file
+    if ! python3 -c "import json; json.load(open('$PINS_FILE'))" &>/dev/null; then
+        echo "ERROR: JSON parsing of $PINS_FILE failed. Pins file is malformed!"
+        exit 1
+    fi
     EXPECTED_BIN_SHA256=$(python3 -c "import json; print(json.load(open('$PINS_FILE')).get('llama_sha256', ''))" 2>/dev/null || echo "")
 fi
 
@@ -89,8 +100,14 @@ echo "[*] Installing binary to $TEMPLATE_VM..."
 # Ensure target directory exists in template
 qvm-run -p "$TEMPLATE_VM" -u root "mkdir -p /usr/bin"
 
-# Stream the binary directly into /usr/bin/llama-server
-qvm-run -p "$TEMPLATE_VM" -u root "dd of=/usr/bin/llama-server bs=1M" < "$LOCAL_BIN"
+# Stream the binary directly into /usr/bin/llama-server with progress reporting
+if command -v pv &>/dev/null; then
+    pv "$LOCAL_BIN" | qvm-run -p "$TEMPLATE_VM" -u root "dd of=/usr/bin/llama-server bs=1M"
+else
+    echo "[*] Transferring binary to template..."
+    qvm-run -p "$TEMPLATE_VM" -u root "dd of=/usr/bin/llama-server bs=1M" < "$LOCAL_BIN"
+    echo "[+] Binary transfer complete."
+fi
 
 # Set correct permissions
 qvm-run -p "$TEMPLATE_VM" -u root "chmod 0755 /usr/bin/llama-server"
