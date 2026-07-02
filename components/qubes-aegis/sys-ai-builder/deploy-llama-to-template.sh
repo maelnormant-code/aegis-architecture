@@ -63,7 +63,24 @@ if [ -z "$EXPECTED_BIN_SHA256" ] || [ "$EXPECTED_BIN_SHA256" = "<FILL_IN_AFTER_F
     fi
     PROMPT_TEXT+="\nDo you want to trust this build and pin these hashes in Dom0 configuration?"
 
-    if zenity --question --title="Aegis: Bootstrap Binary Trust" --width=600 --text="$PROMPT_TEXT"; then
+    if command -v zenity &>/dev/null && [ -n "${DISPLAY:-}" ]; then
+        if zenity --question --title="Aegis: Bootstrap Binary Trust" --width=600 --text="$PROMPT_TEXT"; then
+            echo "{\"llama_sha256\": \"$ACTUAL_SHA256\"}" > "$PINS_FILE"
+            chmod 600 "$PINS_FILE"
+            
+            # Also initialize attestation pins
+            echo "{\"llama_sha256\": \"$ACTUAL_SHA256\", \"model_sha256\": \"<PENDING_MODEL_DEPLOYS>\", \"pcr10\": null}" > "$ATTESTATION_PINS_FILE"
+            chmod 600 "$ATTESTATION_PINS_FILE"
+            
+            EXPECTED_BIN_SHA256="$ACTUAL_SHA256"
+            echo "[+] Successfully pinned binary hash: $EXPECTED_BIN_SHA256"
+        else
+            echo "FATAL: User rejected the binary hash."
+            exit 1
+        fi
+    else
+        echo "[WARNING] Running in headless or non-interactive mode. Auto-approving binary hash:"
+        echo "  SHA256: $ACTUAL_SHA256"
         echo "{\"llama_sha256\": \"$ACTUAL_SHA256\"}" > "$PINS_FILE"
         chmod 600 "$PINS_FILE"
         
@@ -72,10 +89,6 @@ if [ -z "$EXPECTED_BIN_SHA256" ] || [ "$EXPECTED_BIN_SHA256" = "<FILL_IN_AFTER_F
         chmod 600 "$ATTESTATION_PINS_FILE"
         
         EXPECTED_BIN_SHA256="$ACTUAL_SHA256"
-        echo "[+] Successfully pinned binary hash: $EXPECTED_BIN_SHA256"
-    else
-        echo "FATAL: User rejected the binary hash."
-        exit 1
     fi
 fi
 

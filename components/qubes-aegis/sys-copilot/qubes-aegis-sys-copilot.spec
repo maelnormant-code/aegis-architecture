@@ -41,7 +41,7 @@ echo "user=aegis-copilot" > %{buildroot}/etc/qubes/rpc-config/aegis.HeimdallChat
 mkdir -p %{buildroot}/usr/libexec/qubes-aegis/heimdall/
 install -m 0755 heimdall/heimdall-agent.py %{buildroot}/usr/libexec/qubes-aegis/heimdall/
 install -m 0644 heimdall/heimdall-acs.py %{buildroot}/usr/libexec/qubes-aegis/heimdall/
-install -m 0644 heimdall/heimdall-memory.py %{buildroot}/usr/libexec/qubes-aegis/heimdall/
+install -m 0644 heimdall/heimdall_memory.py %{buildroot}/usr/libexec/qubes-aegis/heimdall/
 install -m 0644 heimdall/heimdall_tools.py %{buildroot}/usr/libexec/qubes-aegis/heimdall/
 install -m 0644 heimdall/llm_client.py %{buildroot}/usr/libexec/qubes-aegis/heimdall/
 
@@ -103,7 +103,7 @@ systemctl daemon-reload
 %attr(0644, root, root) /etc/qubes/rpc-config/aegis.HeimdallChat
 %attr(0755, root, root) /usr/libexec/qubes-aegis/heimdall/heimdall-agent.py
 %attr(0644, root, root) /usr/libexec/qubes-aegis/heimdall/heimdall-acs.py
-%attr(0644, root, root) /usr/libexec/qubes-aegis/heimdall/heimdall-memory.py
+%attr(0644, root, root) /usr/libexec/qubes-aegis/heimdall/heimdall_memory.py
 %attr(0644, root, root) /usr/libexec/qubes-aegis/heimdall/heimdall_tools.py
 %attr(0644, root, root) /usr/libexec/qubes-aegis/heimdall/llm_client.py
 %attr(0644, root, root) /usr/lib/systemd/system/aegis-heimdall.service

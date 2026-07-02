@@ -76,7 +76,7 @@ def introspect_self() -> str:
     files = [
         os.path.join(current_dir, "heimdall-agent.py"), 
         os.path.join(current_dir, "heimdall_tools.py"), 
-        os.path.join(current_dir, "heimdall-memory.py")
+        os.path.join(current_dir, "heimdall_memory.py")
     ]
     
     knowledge = "Heimdall Self-Awareness Data:\\n"
