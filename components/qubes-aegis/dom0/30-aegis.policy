@@ -41,6 +41,10 @@ aegis.AttestAI    *  @anyvm             @anyvm       deny
 aegis.AuditLogRead *  sys-copilot       dom0         allow
 aegis.AuditLogRead *  @anyvm            @anyvm       deny
 
+# 3.4 sys-copilot → Dom0: System-wide resource metrics
+aegis.GetSystemStats *  sys-copilot       dom0         allow
+aegis.GetSystemStats *  @anyvm            @anyvm       deny
+
 # 3.5 sys-copilot → Dom0: Subagent delegation
 aegis.DelegateSubagent * sys-copilot dom0 allow
 aegis.DelegateSubagent * @anyvm @anyvm deny

@@ -58,6 +58,7 @@ install -m 0755 aegis.HardwareInfo %{buildroot}/etc/qubes-rpc/
 install -m 0755 aegis.TriggerKnowledgeMaint %{buildroot}/etc/qubes-rpc/
 install -m 0755 aegis.ConfigureAI %{buildroot}/etc/qubes-rpc/
 install -m 0755 aegis.ManagePCI %{buildroot}/etc/qubes-rpc/
+install -m 0755 aegis.GetSystemStats %{buildroot}/etc/qubes-rpc/
 
 mkdir -p %{buildroot}/usr/libexec/qubes-aegis/
 install -m 0755 aegis-first-boot.py %{buildroot}/usr/libexec/qubes-aegis/
@@ -118,6 +119,7 @@ mkdir -p /var/lib/aegis-builds
 %attr(0755, root, root) /etc/qubes-rpc/aegis.TriggerKnowledgeMaint
 %attr(0755, root, root) /etc/qubes-rpc/aegis.ConfigureAI
 %attr(0755, root, root) /etc/qubes-rpc/aegis.ManagePCI
+%attr(0755, root, root) /etc/qubes-rpc/aegis.GetSystemStats
 %attr(0755, root, root) /usr/libexec/qubes-aegis/aegis-first-boot.py
 %attr(0644, root, root) /etc/qubes/rpc-config/aegis.RequestDocBuild
 

@@ -280,6 +280,120 @@ def get_hardware_info() -> str:
     except Exception as e:
         return f"Error: {e}"
 
+def get_system_resources_stats() -> str:
+    """
+    Queries Dom0 for real-time resource usage statistics of the entire system (including Dom0 and all active Qubes).
+    Returns a JSON string containing load average, memory details, and virtual machine allocations.
+    """
+    import subprocess
+    try:
+        proc = subprocess.run(["qrexec-client-vm", "dom0", "aegis.GetSystemStats"], capture_output=True, text=True, timeout=15)
+        return proc.stdout.strip()
+    except Exception as e:
+        return f"Error querying system statistics: {e}"
+
+def get_qube_ram_consumption() -> str:
+    """
+    Retrieves and parses real-time RAM usage statistics for each Qube, formatted in a clear, human-readable layout.
+    """
+    import json
+    raw_stats = get_system_resources_stats()
+    if raw_stats.startswith("Error"):
+        return raw_stats
+    try:
+        data = json.loads(raw_stats)
+        if "error" in data:
+            return f"Error: {data['error']}"
+            
+        qubes = data.get("qubes", [])
+        if not qubes:
+            return "No Qube resource metrics found."
+            
+        # Format dom0 RAM info first
+        dom0_mem = data.get("dom0", {}).get("mem_info", {})
+        out = []
+        if dom0_mem:
+            total_gb = round(dom0_mem.get("total_kb", 0) / (1024 * 1024), 2)
+            free_gb = round(dom0_mem.get("free_kb", 0) / (1024 * 1024), 2)
+            avail_gb = round(dom0_mem.get("available_kb", 0) / (1024 * 1024), 2)
+            out.append("=== Dom0 Memory Info ===")
+            out.append(f"Total: {total_gb} GB | Free: {free_gb} GB | Available: {avail_gb} GB\n")
+            
+        out.append("=== Active Qubes RAM Consumption (Sorted by Usage) ===")
+        
+        # Sort running qubes by memory (highest first)
+        running_qubes = []
+        inactive_qubes = []
+        for q in qubes:
+            if q.get("is_running", False):
+                mem = q.get("memory_mb")
+                try:
+                    mem_val = float(mem) if mem is not None else 0.0
+                except ValueError:
+                    mem_val = 0.0
+                running_qubes.append((q, mem_val))
+            else:
+                inactive_qubes.append(q)
+                
+        running_qubes.sort(key=lambda x: x[1], reverse=True)
+        
+        for q, mem_val in running_qubes:
+            maxmem = q.get("maxmem_mb")
+            maxmem_str = f"{round(maxmem, 1)} MB" if maxmem is not None else "N/A"
+            out.append(f"- {q['name']} ({q['class']}): {round(mem_val, 1)} MB used (Max Limit: {maxmem_str}) [CPU: {q.get('cpu', '-')}]")
+            
+        if inactive_qubes:
+            out.append("\n=== Inactive Qubes (0 MB consumption) ===")
+            out.append(", ".join([q["name"] for q in inactive_qubes]))
+            
+        return "\n".join(out)
+    except Exception as e:
+        return f"Error parsing RAM statistics: {e}"
+
+def get_qube_disk_usage() -> str:
+    """
+    Retrieves and parses storage/disk usage statistics across all Qubes and Dom0's thin pool.
+    """
+    import json
+    raw_stats = get_system_resources_stats()
+    if raw_stats.startswith("Error"):
+        return raw_stats
+    try:
+        data = json.loads(raw_stats)
+        if "error" in data:
+            return f"Error: {data['error']}"
+            
+        out = []
+        # Dom0 Disk usage
+        dom0_disk = data.get("dom0", {}).get("disk_usage", "")
+        if dom0_disk:
+            out.append("=== Dom0 File System Usage ===")
+            out.append(dom0_disk + "\n")
+            
+        qubes = data.get("qubes", [])
+        if not qubes:
+            return "No Qube storage metrics found."
+            
+        out.append("=== Qubes Disk Space Allocation & Volume Usage ===")
+        for q in qubes:
+            vols = q.get("volumes", {})
+            vol_strs = []
+            if vols:
+                for v_name, v_info in vols.items():
+                    size_gb = round(v_info.get("size_bytes", 0) / (1024**3), 2)
+                    usage_gb = round(v_info.get("usage_bytes", 0) / (1024**3), 2)
+                    vol_strs.append(f"{v_name}: {usage_gb} GB used / {size_gb} GB allocated")
+                vol_info_str = " | ".join(vol_strs)
+            else:
+                # If volumes dict is empty, check fallback 'disk' string
+                vol_info_str = f"Usage: {q.get('disk', 'Unknown')}"
+                
+            out.append(f"- {q['name']} ({q['class']}): {vol_info_str}")
+            
+        return "\n".join(out)
+    except Exception as e:
+        return f"Error parsing storage statistics: {e}"
+
 def trigger_knowledge_maintenance() -> str:
     import subprocess, json
     try:
@@ -811,6 +925,9 @@ class ToolRegistry:
             "remove_cron_job": remove_cron_job,
             "delegate_to_subagent": delegate_to_subagent,
             "get_hardware_info": get_hardware_info,
+            "get_system_resources_stats": get_system_resources_stats,
+            "get_qube_ram_consumption": get_qube_ram_consumption,
+            "get_qube_disk_usage": get_qube_disk_usage,
             "trigger_knowledge_maintenance": trigger_knowledge_maintenance,
             "optimize_ai_deployment": optimize_ai_deployment,
             "deploy_autonomous_subagent_researcher": deploy_autonomous_subagent_researcher,
@@ -1096,6 +1213,30 @@ class ToolRegistry:
             {
                 "name": "check_pending_thinker_ideas",
                 "description": "Checks for any unpresented pending ideas generated by the proactive thinker.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {}
+                }
+            },
+            {
+                "name": "get_system_resources_stats",
+                "description": "Queries Dom0 for real-time resource usage statistics of the entire system (including Dom0 and all active Qubes). Returns a JSON string containing load average, memory details, and virtual machine allocations.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {}
+                }
+            },
+            {
+                "name": "get_qube_ram_consumption",
+                "description": "Retrieves and parses real-time RAM usage statistics for each Qube and Dom0, formatted in a clear, human-readable layout.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {}
+                }
+            },
+            {
+                "name": "get_qube_disk_usage",
+                "description": "Retrieves and parses storage/disk usage statistics across all Qubes and Dom0's thin pool.",
                 "parameters": {
                     "type": "object",
                     "properties": {}
