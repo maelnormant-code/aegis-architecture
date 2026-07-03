@@ -1,0 +1,142 @@
+#!/usr/bin/env python3
+# aegis.GetSystemStats — Dom0 qrexec RPC service handler.
+#
+# Retrieves real-time resource stats (RAM, CPU, storage) from Qubes OS Dom0.
+
+import sys
+import json
+import subprocess
+import os
+
+def get_dom0_stats():
+    stats = {}
+    try:
+        with open("/proc/loadavg", "r") as f:
+            stats["load_avg"] = f.read().strip()
+    except Exception as e:
+        stats["load_avg_error"] = str(e)
+        
+    try:
+        with open("/proc/meminfo", "r") as f:
+            mem_lines = f.readlines()
+        mem_info = {}
+        for line in mem_lines:
+            parts = line.split()
+            if len(parts) >= 2:
+                key = parts[0].strip(":")
+                val = int(parts[1])
+                mem_info[key] = val
+        stats["mem_info"] = {
+            "total_kb": mem_info.get("MemTotal"),
+            "free_kb": mem_info.get("MemFree"),
+            "available_kb": mem_info.get("MemAvailable"),
+            "cached_kb": mem_info.get("Cached"),
+            "buffers_kb": mem_info.get("Buffers"),
+            "swap_total_kb": mem_info.get("SwapTotal"),
+            "swap_free_kb": mem_info.get("SwapFree")
+        }
+    except Exception as e:
+        stats["mem_info_error"] = str(e)
+        
+    try:
+        # Get dom0 disk usage
+        proc = subprocess.run(["df", "-h", "/"], capture_output=True, text=True, timeout=5)
+        stats["disk_usage"] = proc.stdout.strip()
+    except Exception as e:
+        stats["disk_usage_error"] = str(e)
+        
+    return stats
+
+def get_cpu_usages():
+    cpu_map = {}
+    try:
+        proc = subprocess.run(["qvm-ls", "--fields", "name,cpu", "--no-headers"], capture_output=True, text=True, timeout=5)
+        for line in proc.stdout.strip().split("\n"):
+            if not line: continue
+            parts = line.split()
+            if len(parts) == 2:
+                cpu_map[parts[0]] = parts[1]
+    except Exception:
+        pass
+    return cpu_map
+
+def get_qubes_stats():
+    qubes_stats = []
+    cpu_map = get_cpu_usages()
+    
+    try:
+        import qubesadmin
+        app = qubesadmin.Qubes()
+        for vm in app.domains:
+            vm_info = {
+                "name": vm.name,
+                "class": vm.klass,
+                "state": vm.get_power_state(),
+                "is_running": vm.is_running(),
+                "cpu": cpu_map.get(vm.name, "-")
+            }
+            try:
+                # vm.memory is in bytes or MiB depending on qubes version, we can query property directly or read
+                vm_info["memory_mb"] = int(vm.memory) / (1024 * 1024) if int(vm.memory) > 100000 else int(vm.memory)
+            except Exception:
+                vm_info["memory_mb"] = None
+                
+            try:
+                vm_info["maxmem_mb"] = int(vm.maxmem) / (1024 * 1024) if int(vm.maxmem) > 100000 else int(vm.maxmem)
+            except Exception:
+                vm_info["maxmem_mb"] = None
+                
+            try:
+                vm_info["vcpus"] = int(vm.vcpus)
+            except Exception:
+                vm_info["vcpus"] = None
+                
+            # Volumes / Storage stats
+            volumes_info = {}
+            try:
+                for vol_name, vol in vm.volumes.items():
+                    volumes_info[vol_name] = {
+                        "size_bytes": vol.size,
+                        "usage_bytes": vol.usage
+                    }
+            except Exception:
+                pass
+            vm_info["volumes"] = volumes_info
+            
+            qubes_stats.append(vm_info)
+    except Exception as e:
+        # Fallback to pure qvm-ls command line if qubesadmin is not fully operational
+        try:
+            proc = subprocess.run(["qvm-ls", "--fields", "name,class,state,memory,maxmem,cpu,disk", "--no-headers"], capture_output=True, text=True, timeout=5)
+            for line in proc.stdout.strip().split("\n"):
+                if not line: continue
+                parts = line.split()
+                if len(parts) >= 3:
+                    qubes_stats.append({
+                        "name": parts[0],
+                        "class": parts[1] if len(parts) > 1 else "Unknown",
+                        "state": parts[2] if len(parts) > 2 else "Unknown",
+                        "memory_mb": parts[3] if len(parts) > 3 else "-",
+                        "maxmem_mb": parts[4] if len(parts) > 4 else "-",
+                        "cpu": parts[5] if len(parts) > 5 else "-",
+                        "disk": parts[6] if len(parts) > 6 else "-",
+                        "volumes": {},
+                        "is_running": parts[2].lower() == "running" if len(parts) > 2 else False
+                    })
+        except Exception as e2:
+            return [{"error": f"Failed to get qubes stats: {str(e)} (Fallback error: {str(e2)})"}]
+            
+    return qubes_stats
+
+def main():
+    try:
+        stats = {
+            "dom0": get_dom0_stats(),
+            "qubes": get_qubes_stats()
+        }
+        print(json.dumps(stats, indent=2))
+    except Exception as e:
+        print(json.dumps({"error": str(e)}))
+
+if __name__ == "__main__":
+    main()
