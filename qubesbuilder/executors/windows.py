@@ -201,7 +201,7 @@ class BaseWindowsExecutor(Executor, ABC):
                         else:
                             # 4.2: attach() handles both cases via persistent flag
                             self.log.debug(
-                                f"{"attaching" if vm_running else "assigning"} EWDK to '{vm}'"
+                                f"{'attaching' if vm_running else 'assigning'} EWDK to '{vm}'"
                             )
                             frontend.devices["block"].attach(assignment)
                     except (
