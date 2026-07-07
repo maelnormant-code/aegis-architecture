@@ -169,7 +169,10 @@ components:
   - linux-scrypt
   - lvm2
   - qubes-release
-  - qubes-aegis
+  - qubes-aegis:
+      url: /home/user/aegis-architecture/components/qubes-aegis
+      branch: main
+      verification-mode: insecure-skip-checking
   - dist-upgrade
   - pykickstart
   - blivet
